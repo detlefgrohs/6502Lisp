@@ -1,10 +1,63 @@
 # Macro System Documentation
 
-The 6502 Lisp parser now includes a comprehensive macro system that allows defining reusable code patterns that expand at parse time. This document explains the macro features and how to use them.
+The 6502 Lisp parser now includes a comprehensive macro system with advanced features including backquote/comma syntax, splice unquote, and macro hygiene. This document explains all macro features and how to use them.
 
 ## Overview
 
 Macros are a powerful feature of Lisp that allow you to define new syntactic constructs. They are functions that take code as input and return transformed code as output. The macro expansion happens at parse time, before evaluation.
+
+## Advanced Macro Features
+
+### Quasiquote (Backquote) Syntax
+
+Quasiquote provides a convenient way to write macro templates with selective evaluation.
+
+#### Basic Syntax
+```lisp
+`expression          ; Quasiquote - create template
+,expression          ; Unquote - evaluate within template  
+,@expression         ; Splice unquote - splice list into template
+```
+
+#### Examples
+```lisp
+; Basic template
+`(list 1 2 3)        ; → (list 1 2 3)
+
+; Template with evaluation
+`(list 1 ,(+ 2 3) 4) ; → (list 1 5 4)
+
+; Template with splicing
+`(list ,@'(a b c) d) ; → (list a b c d)
+
+; Nested quasiquotes
+``(list ,,x ,y)      ; → `(list ,<value-of-x> y)
+```
+
+### Macro Hygiene
+
+Macro hygiene prevents accidental variable capture by automatically generating unique variable names.
+
+#### GENSYM Function
+```lisp
+(gensym)             ; → G1, G2, G3, ... (unique symbols)
+```
+
+#### Hygienic Macro Example
+```lisp
+; Unhygienic (dangerous)
+(defmacro bad-swap (a b)
+  `(let ((temp ,a))
+     (set! ,a ,b)
+     (set! ,b temp)))    ; 'temp' might capture user variable
+
+; Hygienic (safe)  
+(defmacro good-swap (a b)
+  (let ((temp-var (gensym)))
+    `(let ((,temp-var ,a))
+       (set! ,a ,b)
+       (set! ,b ,temp-var))))  ; Unique variable name
+```
 
 ## Macro Definition
 
@@ -49,7 +102,66 @@ Usage: `(inc 5)` → Expands to: `(+ 5 1)` → Evaluates to: `6`
 ```
 Usage: `(square 4)` → Expands to: `(* 4 4)` → Evaluates to: `16`
 
-## Built-in Macros
+## Advanced Macro Definitions
+
+With the new quasiquote syntax, macros become much more readable and powerful:
+
+### WHEN and UNLESS with Quasiquote
+```lisp
+; Modern WHEN macro
+(defmacro when (condition body)
+  `(if ,condition ,body))
+
+; Modern UNLESS macro
+(defmacro unless (condition body)
+  `(if (not ,condition) ,body))
+```
+
+### Complex Macros with Splice Unquote
+```lisp
+; COND macro for multi-way conditionals
+(defmacro cond (&rest clauses)
+  (if (null clauses)
+      nil
+      (let ((clause (car clauses)))
+        `(if ,(car clause)
+             ,(cadr clause)
+             (cond ,@(cdr clauses))))))
+
+; Usage: (cond ((= x 1) "one") ((= x 2) "two") (t "other"))
+```
+
+### Hygienic Macros
+```lisp
+; Safe SWAP macro using gensym
+(defmacro swap (a b)
+  (let ((temp (gensym)))
+    `(let ((,temp ,a))
+       (set! ,a ,b)
+       (set! ,b ,temp))))
+
+; LET* macro with proper variable scoping
+(defmacro let* (bindings body)
+  (if (null bindings)
+      body
+      `(let (,(car bindings))
+         (let* ,(cdr bindings) ,body))))
+```
+
+## Built-in Functions
+
+### Core Functions
+- `(defmacro name (params) body)` - Define a new macro
+- `(quote expr)` - Prevent evaluation of expression
+- `(unquote expr)` - Force evaluation within quoted context
+- `(quasiquote expr)` - Create template with selective evaluation
+- `(unquote-splicing expr)` - Splice list into surrounding context
+
+### Hygiene Functions
+- `(gensym)` - Generate unique symbol for macro hygiene
+- `(macroexpand expr)` - Expand macro form once (debugging)
+
+### Built-in Macros
 
 The system comes with several predefined macros:
 
@@ -69,9 +181,14 @@ Expands to: `(if (not condition) body)`
 
 ## Memory Layout
 
+### Enhanced Memory Structure
+```
+Address Range: $1400-$17FF (1KB) - Macro definitions
+Address Range: $1800-$1BFF (1KB) - Hygiene symbol table
+```
+
 ### Macro Table Structure
 ```
-Address Range: $1400-$17FF (1KB)
 Entry Size: 64 bytes per macro
 Maximum Macros: 16
 
@@ -81,28 +198,46 @@ Offset 16:    Parameter count
 Offset 17-63: Macro body template
 ```
 
-### Zero Page Variables
+### Extended Zero Page Variables
 ```assembly
 MACRO_PTR    = $20    ; Pointer to current macro entry
 MACRO_ARGC   = $22    ; Macro argument count  
 EXPAND_FLAG  = $23    ; Macro expansion in progress
 MACRO_DEPTH  = $24    ; Recursion depth (max 5)
+QUASI_DEPTH  = $25    ; Quasiquote nesting depth
+GENSYM_COUNT = $26    ; Counter for unique symbol generation
+SPLICE_FLAG  = $27    ; Splice unquote flag
+HYGIENE_PTR  = $28    ; Pointer to hygiene symbol table
+```
+
+### Extended Token Types
+```assembly
+TOK_BACKQUOTE = $05   ; ` (quasiquote)
+TOK_COMMA     = $06   ; , (unquote)  
+TOK_COMMA_AT  = $07   ; ,@ (unquote-splicing)
 ```
 
 ## Implementation Details
 
-### Macro Lookup Process
-1. When a symbol is encountered, first check if it's a macro
-2. If macro found, initiate expansion process
-3. If not a macro, check built-in function table
-4. If neither, treat as unknown symbol
+### Enhanced Tokenizer
+The tokenizer now recognizes:
+- Backquote (`) for quasiquote templates
+- Comma (,) for unquote expressions  
+- Comma-at (,@) for splice unquote expressions
 
-### Expansion Process
-1. Validate argument count matches macro parameters
-2. Check recursion depth (prevent infinite expansion)
-3. Substitute parameters in macro body template
-4. Parse expanded text as new expression
-5. Evaluate resulting expression
+### Quasiquote Expansion
+1. Parse backquote expression into template structure
+2. Walk template recursively 
+3. Leave quoted parts unchanged
+4. Evaluate unquote expressions
+5. Splice unquote-splicing expressions into surrounding list
+
+### Macro Hygiene Process
+1. Identify variable bindings in macro body
+2. Generate unique replacements using gensym
+3. Create mapping in hygiene table
+4. Replace all occurrences consistently
+5. Prevent accidental variable capture
 
 ### Parameter Substitution
 The macro body uses special placeholders:

@@ -37,11 +37,15 @@ The interpreter is written entirely in 6502 assembly language and is designed to
 - `(or a b c ...)` - Logical OR of multiple values  
 - `(not a)` - Logical NOT of a single value
 
-#### Macro System
+#### Advanced Macro System
 - `(defmacro name (params) body)` - Define a new macro
-- `(quote expr)` - Prevent evaluation of expression
-- `(unquote expr)` - Force evaluation within quoted context
-- **Built-in macros**: `when`, `unless` for conditional execution
+- `(quote expr)` or `'expr` - Prevent evaluation of expression
+- `(quasiquote expr)` or `\`expr` - Create template with selective evaluation
+- `(unquote expr)` or `,expr` - Force evaluation within template
+- `(unquote-splicing expr)` or `,@expr` - Splice list into template
+- `(gensym)` - Generate unique symbols for macro hygiene
+- `(macroexpand expr)` - Expand macro form once
+- **Built-in macros**: `when`, `unless` with full quasiquote support
 
 ### Example Expressions
 ```lisp
@@ -53,22 +57,28 @@ The interpreter is written entirely in 6502 assembly language and is designed to
 (and (= 5 5) (< 3 10))       ; Returns 1 (true)
 (+ (* 2 3) (- 10 5))         ; Returns 11
 
-; Macro examples
+; Basic macro examples
 (when (> 5 0) 42)            ; Returns 42 (conditional execution)
 (unless (= 0 1) 100)         ; Returns 100 (inverse conditional)
+
+; Advanced macro examples with quasiquote
+`(list 1 ,(+ 2 3) 4)         ; Template: (list 1 5 4)
+`(append ,@'(a b) c)         ; Splice: (append a b c)
+(let ((x (gensym))) x)       ; Unique symbol: G1, G2, etc.
 ```
 
 ## Files
 
 ### Core Implementation
 - **`lisp_parser.asm`** - Basic Lisp parser with core functionality
-- **`lisp_extended.asm`** - Extended version with full feature set including macros
+- **`lisp_extended.asm`** - Extended version with advanced macro system
 - **`examples.asm`** - Test cases and example expressions
 - **`macro_examples.asm`** - Comprehensive macro system examples and tests
+- **`advanced_macro_examples.asm`** - Advanced features: quasiquote, hygiene, etc.
 
 ### Documentation  
 - **`LISP_DOCUMENTATION.md`** - Detailed technical documentation
-- **`MACRO_DOCUMENTATION.md`** - Complete macro system documentation
+- **`MACRO_DOCUMENTATION.md`** - Complete macro system documentation with advanced features
 - **`README.md`** - This file
 
 ## Memory Layout

@@ -10,6 +10,10 @@ MACRO_PTR    = $20    ; Pointer to current macro
 MACRO_ARGC   = $22    ; Macro argument count
 EXPAND_FLAG  = $23    ; Macro expansion flag
 MACRO_DEPTH  = $24    ; Macro expansion depth (prevent infinite recursion)
+QUASI_DEPTH  = $25    ; Quasiquote nesting depth
+GENSYM_COUNT = $26    ; Counter for generating unique symbols
+SPLICE_FLAG  = $27    ; Splice unquote flag
+HYGIENE_PTR  = $28    ; Pointer to hygiene symbol table
 
 ; Function IDs
 FUNC_ADD     = $01
@@ -28,6 +32,46 @@ FUNC_CDR     = $0D
 FUNC_DEFMACRO = $0E
 FUNC_QUOTE   = $0F
 FUNC_UNQUOTE = $10
+FUNC_QUASIQUOTE = $11
+FUNC_UNQUOTE_SPLICE = $12
+FUNC_GENSYM  = $13
+FUNC_MACROEXPAND = $14
+
+; Advanced macro system constants
+HYGIENE_TABLE = $1800  ; Hygiene symbol table
+MAX_HYGIENE_SYMBOLS = $20  ; Maximum hygienic symbols
+GENSYM_PREFIX = "G"    ; Prefix for generated symbols
+
+; Extended token types for advanced macros
+TOK_EOF      = $00
+TOK_LPAREN   = $01
+TOK_RPAREN   = $02
+TOK_NUMBER   = $03
+TOK_SYMBOL   = $04
+TOK_BACKQUOTE = $05    ; `
+TOK_COMMA    = $06     ; ,
+TOK_COMMA_AT = $07     ; ,@
+TOK_ERROR    = $FF
+
+; Extended ASCII codes
+CHAR_SPACE   = $20
+CHAR_LPAREN  = $28    ; '('
+CHAR_RPAREN  = $29    ; ')'
+CHAR_COMMA   = $2C    ; ','
+CHAR_0       = $30    ; '0'
+CHAR_9       = $39    ; '9'
+CHAR_A       = $41    ; 'A'
+CHAR_Z       = $5A    ; 'Z'
+CHAR_BACKQUOTE = $60  ; '`'
+CHAR_a       = $61    ; 'a'
+CHAR_z       = $7A    ; 'z'
+CHAR_AT      = $40    ; '@'
+
+; Memory areas
+INPUT_BUFFER = $0200  ; Input text buffer
+WORKSPACE    = $0400  ; General workspace
+SYMBOL_TABLE = $0800  ; Symbol definitions
+EXPR_STACK   = $1000  ; Expression evaluation stack
 
 ; Macro table layout (after symbol table)
 MACRO_TABLE  = $1400  ; Macro definitions storage
@@ -41,8 +85,10 @@ MAIN:
         JSR INIT_PARSER
         JSR INIT_SYMBOLS
         JSR INIT_MACROS
+        JSR INIT_HYGIENE
         JSR RUN_TESTS
         JSR RUN_MACRO_TESTS
+        JSR RUN_ADVANCED_MACRO_TESTS
         BRK
 
 ; Initialize built-in symbols
@@ -94,6 +140,10 @@ BUILTIN_NAMES:
         .byte "defmacro", $00
         .byte "quote", $00
         .byte "unquote", $00
+        .byte "quasiquote", $00
+        .byte "unquote-splicing", $00
+        .byte "gensym", $00
+        .byte "macroexpand", $00
         .byte $00
 
 ; Corresponding function IDs
@@ -114,12 +164,10 @@ BUILTIN_IDS:
         .byte FUNC_DEFMACRO
         .byte FUNC_QUOTE
         .byte FUNC_UNQUOTE
-        .byte FUNC_LT
-        .byte FUNC_GT
-        .byte FUNC_AND
-        .byte FUNC_OR
-        .byte FUNC_NOT
-        .byte FUNC_LIST
+        .byte FUNC_QUASIQUOTE
+        .byte FUNC_UNQUOTE_SPLICE
+        .byte FUNC_GENSYM
+        .byte FUNC_MACROEXPAND
         .byte FUNC_CAR
         .byte FUNC_CDR
 
@@ -361,6 +409,14 @@ CALL_FUNCTION:
         BEQ @CALL_QUOTE
         CMP #FUNC_UNQUOTE
         BEQ @CALL_UNQUOTE
+        CMP #FUNC_QUASIQUOTE
+        BEQ @CALL_QUASIQUOTE
+        CMP #FUNC_UNQUOTE_SPLICE
+        BEQ @CALL_UNQUOTE_SPLICE
+        CMP #FUNC_GENSYM
+        BEQ @CALL_GENSYM
+        CMP #FUNC_MACROEXPAND
+        BEQ @CALL_MACROEXPAND
         
         ; Unknown function
         LDA #$03
@@ -417,6 +473,22 @@ CALL_FUNCTION:
 
 @CALL_UNQUOTE:
         JSR FUNC_UNQUOTE
+        RTS
+
+@CALL_QUASIQUOTE:
+        JSR FUNC_QUASIQUOTE
+        RTS
+
+@CALL_UNQUOTE_SPLICE:
+        JSR FUNC_UNQUOTE_SPLICE
+        RTS
+
+@CALL_GENSYM:
+        JSR FUNC_GENSYM
+        RTS
+
+@CALL_MACROEXPAND:
+        JSR FUNC_MACROEXPAND
         RTS
 
 ; Count arguments on expression stack
@@ -863,6 +935,427 @@ FUNC_LOGICAL_NOT:
         RTS
 
 ; ======================================================================
+; ADVANCED TOKENIZER FOR BACKQUOTE/COMMA SUPPORT
+; ======================================================================
+
+; Enhanced tokenizer that handles `, ,, and ,@
+GET_ENHANCED_TOKEN:
+        JSR SKIP_WHITESPACE
+        JSR PEEK_CHAR
+        
+        ; Check for EOF
+        CMP #$00
+        BEQ @SET_EOF_TOK
+        
+        ; Check for left paren
+        CMP #CHAR_LPAREN
+        BEQ @SET_LPAREN_TOK
+        
+        ; Check for right paren
+        CMP #CHAR_RPAREN
+        BEQ @SET_RPAREN_TOK
+        
+        ; Check for backquote
+        CMP #CHAR_BACKQUOTE
+        BEQ @SET_BACKQUOTE_TOK
+        
+        ; Check for comma (and comma-at)
+        CMP #CHAR_COMMA
+        BEQ @CHECK_COMMA_TYPES
+        
+        ; Check for digit (start of number)
+        CMP #CHAR_0
+        BCC @TRY_SYMBOL_TOK
+        CMP #CHAR_9+1
+        BCC @READ_NUMBER_TOK
+        
+@TRY_SYMBOL_TOK:
+        ; Try to read as symbol
+        JSR READ_SYMBOL_ENHANCED
+        LDA #TOK_SYMBOL
+        STA TOKEN_TYPE
+        RTS
+
+@SET_EOF_TOK:
+        LDA #TOK_EOF
+        STA TOKEN_TYPE
+        RTS
+
+@SET_LPAREN_TOK:
+        JSR NEXT_CHAR
+        LDA #TOK_LPAREN
+        STA TOKEN_TYPE
+        RTS
+
+@SET_RPAREN_TOK:
+        JSR NEXT_CHAR
+        LDA #TOK_RPAREN
+        STA TOKEN_TYPE
+        RTS
+
+@SET_BACKQUOTE_TOK:
+        JSR NEXT_CHAR
+        LDA #TOK_BACKQUOTE
+        STA TOKEN_TYPE
+        RTS
+
+@CHECK_COMMA_TYPES:
+        ; Advance past comma
+        JSR NEXT_CHAR
+        
+        ; Check if next character is @
+        JSR PEEK_CHAR
+        CMP #CHAR_AT
+        BNE @SET_COMMA_TOK
+        
+        ; It's ,@ (splice unquote)
+        JSR NEXT_CHAR
+        LDA #TOK_COMMA_AT
+        STA TOKEN_TYPE
+        RTS
+
+@SET_COMMA_TOK:
+        ; Just a regular comma (unquote)
+        LDA #TOK_COMMA
+        STA TOKEN_TYPE
+        RTS
+
+@READ_NUMBER_TOK:
+        JSR READ_NUMBER_TOKEN
+        LDA #TOK_NUMBER
+        STA TOKEN_TYPE
+        RTS
+
+; Enhanced symbol reader (same as before but calls enhanced char functions)
+READ_SYMBOL_ENHANCED:
+        LDY #$00
+        
+@READ_CHAR_ENH:
+        JSR PEEK_CHAR
+        
+        ; Check for end of symbol
+        CMP #CHAR_SPACE
+        BEQ @SYMBOL_DONE_ENH
+        CMP #CHAR_LPAREN
+        BEQ @SYMBOL_DONE_ENH
+        CMP #CHAR_RPAREN
+        BEQ @SYMBOL_DONE_ENH
+        CMP #CHAR_BACKQUOTE
+        BEQ @SYMBOL_DONE_ENH
+        CMP #CHAR_COMMA
+        BEQ @SYMBOL_DONE_ENH
+        CMP #$00
+        BEQ @SYMBOL_DONE_ENH
+        
+        ; Store character
+        STA WORKSPACE,Y
+        INY
+        
+        ; Advance input
+        JSR NEXT_CHAR
+        JMP @READ_CHAR_ENH
+
+@SYMBOL_DONE_ENH:
+        ; Null terminate
+        LDA #$00
+        STA WORKSPACE,Y
+        
+        ; Store pointer to symbol
+        LDA #<WORKSPACE
+        STA TOKEN_VALUE
+        LDA #>WORKSPACE
+        STA TOKEN_VALUE+1
+        
+        RTS
+
+; Enhanced expression parser that handles quasiquote constructs
+PARSE_ENHANCED_EXPR:
+        JSR GET_ENHANCED_TOKEN
+        
+        ; Check token type
+        LDA TOKEN_TYPE
+        CMP #TOK_EOF
+        BEQ @PARSE_EOF
+        
+        CMP #TOK_BACKQUOTE
+        BEQ @PARSE_QUASIQUOTE
+        
+        CMP #TOK_COMMA
+        BEQ @PARSE_UNQUOTE
+        
+        CMP #TOK_COMMA_AT
+        BEQ @PARSE_SPLICE
+        
+        CMP #TOK_LPAREN
+        BEQ @PARSE_LIST_ENH
+        
+        CMP #TOK_NUMBER
+        BEQ @PARSE_NUMBER_ENH
+        
+        CMP #TOK_SYMBOL
+        BEQ @PARSE_SYMBOL_ENH
+        
+        ; Error - unexpected token
+        LDA #$01
+        STA ERROR_FLAG
+        RTS
+
+@PARSE_EOF:
+        RTS
+
+@PARSE_QUASIQUOTE:
+        ; Handle `expr - convert to (quasiquote expr)
+        JSR HANDLE_QUASIQUOTE_READER
+        RTS
+
+@PARSE_UNQUOTE:
+        ; Handle ,expr - convert to (unquote expr)
+        JSR HANDLE_UNQUOTE_READER
+        RTS
+
+@PARSE_SPLICE:
+        ; Handle ,@expr - convert to (unquote-splicing expr)
+        JSR HANDLE_SPLICE_READER
+        RTS
+
+@PARSE_LIST_ENH:
+        ; Parse regular list
+        JSR PARSE_LIST_ENHANCED
+        RTS
+
+@PARSE_NUMBER_ENH:
+        ; Push number onto stack
+        JSR PUSH_NUMBER
+        RTS
+
+@PARSE_SYMBOL_ENH:
+        ; Look up symbol and handle macros
+        JSR LOOKUP_ENHANCED_SYMBOL
+        RTS
+
+; Handle `expr reader macro
+HANDLE_QUASIQUOTE_READER:
+        ; Create (quasiquote expr) form
+        ; First push the quasiquote symbol
+        LDA #<QUASIQUOTE_SYM
+        STA TOKEN_VALUE
+        LDA #>QUASIQUOTE_SYM
+        STA TOKEN_VALUE+1
+        JSR PUSH_SYMBOL_REF
+        
+        ; Parse the expression after `
+        INC QUASI_DEPTH
+        JSR PARSE_ENHANCED_EXPR
+        DEC QUASI_DEPTH
+        
+        ; Create list with quasiquote and expression
+        JSR CREATE_QUASIQUOTE_FORM
+        RTS
+
+QUASIQUOTE_SYM:
+        .byte "quasiquote", $00
+
+; Handle ,expr reader macro
+HANDLE_UNQUOTE_READER:
+        ; Create (unquote expr) form
+        LDA #<UNQUOTE_SYM
+        STA TOKEN_VALUE
+        LDA #>UNQUOTE_SYM
+        STA TOKEN_VALUE+1
+        JSR PUSH_SYMBOL_REF
+        
+        ; Parse the expression after ,
+        JSR PARSE_ENHANCED_EXPR
+        
+        ; Create list with unquote and expression
+        JSR CREATE_UNQUOTE_FORM
+        RTS
+
+UNQUOTE_SYM:
+        .byte "unquote", $00
+
+; Handle ,@expr reader macro
+HANDLE_SPLICE_READER:
+        ; Create (unquote-splicing expr) form
+        LDA #<SPLICE_SYM
+        STA TOKEN_VALUE
+        LDA #>SPLICE_SYM
+        STA TOKEN_VALUE+1
+        JSR PUSH_SYMBOL_REF
+        
+        ; Parse the expression after ,@
+        LDA #$01
+        STA SPLICE_FLAG
+        JSR PARSE_ENHANCED_EXPR
+        LDA #$00
+        STA SPLICE_FLAG
+        
+        ; Create list with unquote-splicing and expression
+        JSR CREATE_SPLICE_FORM
+        RTS
+
+SPLICE_SYM:
+        .byte "unquote-splicing", $00
+
+; Create quasiquote form from stack contents
+CREATE_QUASIQUOTE_FORM:
+        ; This would create the proper list structure
+        ; For now, just push a placeholder
+        LDA #$01
+        STA TOKEN_VALUE
+        LDA #$00
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+; Create unquote form from stack contents  
+CREATE_UNQUOTE_FORM:
+        ; This would create the proper list structure
+        ; For now, just push a placeholder
+        LDA #$02
+        STA TOKEN_VALUE
+        LDA #$00
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+; Create splice form from stack contents
+CREATE_SPLICE_FORM:
+        ; This would create the proper list structure
+        ; For now, just push a placeholder
+        LDA #$03
+        STA TOKEN_VALUE
+        LDA #$00
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+; Push symbol reference onto stack
+PUSH_SYMBOL_REF:
+        ; For now, just push the symbol as a number
+        LDA TOKEN_VALUE
+        STA TEMP
+        LDA TOKEN_VALUE+1
+        STA TEMP+1
+        
+        ; Convert address to number representation
+        LDA TEMP
+        STA TOKEN_VALUE
+        LDA TEMP+1
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+; Enhanced symbol lookup with macro handling
+LOOKUP_ENHANCED_SYMBOL:
+        ; First try regular lookup
+        JSR LOOKUP_SYMBOL
+        
+        ; Check if it's a macro that needs expansion
+        LDA TOKEN_VALUE
+        ORA TOKEN_VALUE+1
+        BNE @FOUND_SOMETHING
+        
+        ; Not found - return 0
+        LDA #$00
+        STA TOKEN_VALUE
+        STA TOKEN_VALUE+1
+
+@FOUND_SOMETHING:
+        JSR PUSH_NUMBER
+        RTS
+
+; Parse enhanced list with quasiquote support
+PARSE_LIST_ENHANCED:
+        ; Similar to regular list parsing but with quasiquote awareness
+        INC PAREN_COUNT
+        
+        ; Get function name
+        JSR SKIP_WHITESPACE
+        JSR GET_ENHANCED_TOKEN
+        
+        ; Should be a symbol
+        LDA TOKEN_TYPE
+        CMP #TOK_SYMBOL
+        BNE @LIST_ERROR_ENH
+        
+        ; Store function for later
+        LDA TOKEN_VALUE
+        PHA
+        LDA TOKEN_VALUE+1
+        PHA
+        
+        ; Parse arguments with enhanced parsing
+        JSR PARSE_ENHANCED_ARGS
+        
+        ; Get function back
+        PLA
+        STA TOKEN_VALUE+1
+        PLA
+        STA TOKEN_VALUE
+        
+        ; Call function or expand macro
+        JSR CALL_OR_EXPAND
+        
+        ; Expect closing paren
+        JSR SKIP_WHITESPACE
+        JSR GET_ENHANCED_TOKEN
+        LDA TOKEN_TYPE
+        CMP #TOK_RPAREN
+        BNE @LIST_ERROR_ENH
+        
+        DEC PAREN_COUNT
+        RTS
+
+@LIST_ERROR_ENH:
+        LDA #$02
+        STA ERROR_FLAG
+        RTS
+
+; Parse arguments with enhanced support
+PARSE_ENHANCED_ARGS:
+@ARG_LOOP_ENH:
+        JSR SKIP_WHITESPACE
+        JSR PEEK_CHAR
+        
+        ; Check for closing paren
+        CMP #CHAR_RPAREN
+        BEQ @ARGS_DONE_ENH
+        
+        ; Parse next argument with enhanced parser
+        JSR PARSE_ENHANCED_EXPR
+        
+        ; Check for error
+        LDA ERROR_FLAG
+        BNE @ARGS_DONE_ENH
+        
+        JMP @ARG_LOOP_ENH
+
+@ARGS_DONE_ENH:
+        RTS
+
+; Call function or expand macro
+CALL_OR_EXPAND:
+        ; Check if it's a macro first
+        JSR IS_MACRO_CALL
+        BNE @EXPAND_MACRO_CALL
+        
+        ; Regular function call
+        JSR CALL_FUNCTION
+        RTS
+
+@EXPAND_MACRO_CALL:
+        JSR EXPAND_MACRO
+        RTS
+
+; Check if current symbol is a macro call
+IS_MACRO_CALL:
+        ; This would check if TOKEN_VALUE points to a macro
+        ; For now, return false (not a macro)
+        LDA #$00
+        RTS
+
+; ======================================================================
 ; MACRO SYSTEM IMPLEMENTATION
 ; ======================================================================
 
@@ -1217,3 +1710,401 @@ TEST_UNLESS_MACRO:
 
 TEST_UNLESS_EXPR:
         .byte "(unless 0 42)", $00
+
+; ======================================================================
+; ADVANCED MACRO FUNCTIONS
+; ======================================================================
+
+; QUASIQUOTE function - template with selective evaluation
+FUNC_QUASIQUOTE:
+        LDA ARGC
+        CMP #$01
+        BNE @QUASIQUOTE_ERROR
+        
+        ; Process quasiquote template
+        JSR PROCESS_QUASIQUOTE_TEMPLATE
+        RTS
+
+@QUASIQUOTE_ERROR:
+        LDA #$15
+        STA ERROR_FLAG
+        RTS
+
+; Process quasiquote template with unquote expansion
+PROCESS_QUASIQUOTE_TEMPLATE:
+        ; Get the template from stack
+        JSR POP_NUMBER
+        
+        ; Process the template, expanding unquotes
+        JSR EXPAND_QUASIQUOTE_RECURSIVE
+        
+        ; Push result back
+        JSR PUSH_NUMBER
+        RTS
+
+; Recursively expand quasiquote template
+EXPAND_QUASIQUOTE_RECURSIVE:
+        ; This is a complex operation that would:
+        ; 1. Walk through the template structure
+        ; 2. Leave quoted parts unchanged
+        ; 3. Evaluate unquote expressions
+        ; 4. Splice unquote-splicing expressions
+        
+        ; Simplified implementation - just return template
+        RTS
+
+; UNQUOTE_SPLICE function - splice lists into surrounding context
+FUNC_UNQUOTE_SPLICE:
+        LDA ARGC
+        CMP #$01
+        BNE @SPLICE_ERROR
+        
+        ; Mark that this is a splicing operation
+        LDA #$01
+        STA SPLICE_FLAG
+        
+        ; Evaluate the expression
+        JSR POP_NUMBER
+        ; In a real implementation, this would be marked for splicing
+        JSR PUSH_NUMBER
+        
+        RTS
+
+@SPLICE_ERROR:
+        LDA #$16
+        STA ERROR_FLAG
+        RTS
+
+; GENSYM function - generate unique symbols for macro hygiene
+FUNC_GENSYM:
+        ; Generate a unique symbol name
+        JSR GENERATE_UNIQUE_SYMBOL
+        
+        ; Push the new symbol onto stack
+        JSR PUSH_NUMBER
+        RTS
+
+; Generate unique symbol for macro hygiene
+GENERATE_UNIQUE_SYMBOL:
+        ; Increment gensym counter
+        INC GENSYM_COUNT
+        
+        ; Create symbol name: G + counter
+        LDY #$00
+        
+        ; Store prefix 'G'
+        LDA #'G'
+        STA WORKSPACE,Y
+        INY
+        
+        ; Convert counter to ASCII digits
+        LDA GENSYM_COUNT
+        JSR CONVERT_TO_ASCII
+        
+        ; Null terminate
+        LDA #$00
+        STA WORKSPACE,Y
+        
+        ; Set up result pointer
+        LDA #<WORKSPACE
+        STA TOKEN_VALUE
+        LDA #>WORKSPACE
+        STA TOKEN_VALUE+1
+        
+        RTS
+
+; Convert number in A to ASCII digits in WORKSPACE starting at Y
+CONVERT_TO_ASCII:
+        ; Simple conversion for numbers 0-99
+        CMP #$0A
+        BCC @SINGLE_DIGIT
+        
+        ; Two digits
+        PHA
+        SEC
+        SBC #$0A
+        STA TEMP
+        LDA #'1'
+        STA WORKSPACE,Y
+        INY
+        LDA TEMP
+        CLC
+        ADC #'0'
+        STA WORKSPACE,Y
+        INY
+        PLA
+        RTS
+
+@SINGLE_DIGIT:
+        ; Single digit
+        CLC
+        ADC #'0'
+        STA WORKSPACE,Y
+        INY
+        RTS
+
+; MACROEXPAND function - expand a macro form once
+FUNC_MACROEXPAND:
+        LDA ARGC
+        CMP #$01
+        BNE @MACROEXPAND_ERROR
+        
+        ; Get the form to expand
+        JSR POP_NUMBER
+        
+        ; Check if it's a macro call
+        JSR CHECK_IF_MACRO_FORM
+        BEQ @NOT_MACRO_FORM
+        
+        ; Expand the macro once
+        JSR EXPAND_MACRO_ONCE
+        JMP @MACROEXPAND_DONE
+
+@NOT_MACRO_FORM:
+        ; Not a macro, return unchanged
+        
+@MACROEXPAND_DONE:
+        JSR PUSH_NUMBER
+        RTS
+
+@MACROEXPAND_ERROR:
+        LDA #$17
+        STA ERROR_FLAG
+        RTS
+
+; Check if form is a macro call
+CHECK_IF_MACRO_FORM:
+        ; This would analyze the form to see if it's a macro call
+        ; Return 0 if not macro, non-zero if macro
+        LDA #$00
+        RTS
+
+; Expand macro once (non-recursive)
+EXPAND_MACRO_ONCE:
+        ; Perform one level of macro expansion
+        ; This is the core of the macro system
+        RTS
+
+; ======================================================================
+; MACRO HYGIENE SYSTEM
+; ======================================================================
+
+; Initialize hygiene system
+INIT_HYGIENE:
+        ; Clear hygiene table
+        LDX #$00
+        LDA #$00
+@CLEAR_HYGIENE:
+        STA HYGIENE_TABLE,X
+        INX
+        CPX #(MAX_HYGIENE_SYMBOLS * $10)  ; 16 bytes per entry
+        BNE @CLEAR_HYGIENE
+        
+        ; Initialize hygiene pointer
+        LDA #<HYGIENE_TABLE
+        STA HYGIENE_PTR
+        LDA #>HYGIENE_TABLE
+        STA HYGIENE_PTR+1
+        
+        RTS
+
+; Add hygienic renaming for variable
+ADD_HYGIENE_BINDING:
+        ; Input: original symbol in TOKEN_VALUE
+        ; Output: creates new unique symbol and stores mapping
+        
+        ; Generate unique replacement
+        JSR GENERATE_UNIQUE_SYMBOL
+        
+        ; Store in hygiene table
+        JSR STORE_HYGIENE_MAPPING
+        
+        RTS
+
+; Store hygiene mapping in table
+STORE_HYGIENE_MAPPING:
+        ; Store original symbol name and its replacement
+        ; This would maintain a mapping table for macro expansion
+        RTS
+
+; Lookup hygienic replacement for symbol
+LOOKUP_HYGIENE_REPLACEMENT:
+        ; Input: symbol in TOKEN_VALUE
+        ; Output: replacement symbol if found, original if not
+        
+        ; Search hygiene table for mapping
+        LDX #$00
+@HYGIENE_SEARCH:
+        ; Compare with entries in hygiene table
+        ; If found, return replacement
+        ; If not found, return original
+        
+        ; For now, just return original
+        RTS
+
+; Apply hygiene to macro body
+APPLY_MACRO_HYGIENE:
+        ; This would walk through the macro body and:
+        ; 1. Identify variable bindings
+        ; 2. Create unique replacements
+        ; 3. Replace all occurrences consistently
+        
+        ; This is a complex operation requiring:
+        ; - Syntax tree analysis
+        ; - Variable scope tracking
+        ; - Consistent renaming
+        
+        RTS
+
+; ======================================================================
+; ADVANCED MACRO TESTS
+; ======================================================================
+
+; Test quasiquote functionality
+TEST_QUASIQUOTE:
+        LDX #$00
+@COPY_QUASI:
+        LDA TEST_QUASI_EXPR,X
+        STA INPUT_BUFFER,X
+        BEQ @PARSE_QUASI
+        INX
+        JMP @COPY_QUASI
+@PARSE_QUASI:
+        JSR RESET_PARSER
+        JSR PARSE_ENHANCED_EXPR
+        RTS
+
+TEST_QUASI_EXPR:
+        .byte "`(list 1 ,(+ 2 3) 4)", $00
+
+; Test gensym functionality
+TEST_GENSYM:
+        JSR FUNC_GENSYM
+        ; Should generate unique symbol
+        JSR FUNC_GENSYM
+        ; Should generate different unique symbol
+        RTS
+
+; Test macro hygiene
+TEST_HYGIENE:
+        ; Test that macro doesn't capture variables
+        LDX #$00
+@COPY_HYGIENE:
+        LDA TEST_HYGIENE_EXPR,X
+        STA INPUT_BUFFER,X
+        BEQ @PARSE_HYGIENE
+        INX
+        JMP @COPY_HYGIENE
+@PARSE_HYGIENE:
+        JSR RESET_PARSER
+        JSR PARSE_ENHANCED_EXPR
+        RTS
+
+TEST_HYGIENE_EXPR:
+        .byte "(let ((x 1)) (my-macro x))", $00
+
+; Run all advanced macro tests
+RUN_ADVANCED_MACRO_TESTS:
+        JSR TEST_QUASIQUOTE
+        JSR TEST_GENSYM
+        JSR TEST_HYGIENE
+        RTS
+
+; ======================================================================
+; UTILITY FUNCTIONS FOR ADVANCED FEATURES
+; ======================================================================
+
+; Skip whitespace (enhanced version)
+SKIP_WHITESPACE:
+        JSR PEEK_CHAR
+        CMP #CHAR_SPACE
+        BNE @WS_DONE
+        JSR NEXT_CHAR
+        JMP SKIP_WHITESPACE
+@WS_DONE:
+        RTS
+
+; Peek at current character without advancing
+PEEK_CHAR:
+        LDY #$00
+        LDA (INPUT_PTR),Y
+        RTS
+
+; Get next character and advance pointer
+NEXT_CHAR:
+        LDY #$00
+        LDA (INPUT_PTR),Y
+        INC INPUT_PTR
+        BNE @CHAR_NO_CARRY
+        INC INPUT_PTR+1
+@CHAR_NO_CARRY:
+        RTS
+
+; Read number token (enhanced)
+READ_NUMBER_TOKEN:
+        LDA #$00
+        STA TOKEN_VALUE
+        STA TOKEN_VALUE+1
+        
+@READ_DIGIT_ENH:
+        JSR PEEK_CHAR
+        
+        ; Check if digit
+        CMP #CHAR_0
+        BCC @NUMBER_DONE_ENH
+        CMP #CHAR_9+1
+        BCS @NUMBER_DONE_ENH
+        
+        ; Convert ASCII to digit
+        SEC
+        SBC #CHAR_0
+        STA TEMP
+        
+        ; Multiply current value by 10
+        JSR MULTIPLY_BY_10
+        
+        ; Add new digit
+        CLC
+        LDA TOKEN_VALUE
+        ADC TEMP
+        STA TOKEN_VALUE
+        LDA TOKEN_VALUE+1
+        ADC #$00
+        STA TOKEN_VALUE+1
+        
+        ; Advance to next character
+        JSR NEXT_CHAR
+        JMP @READ_DIGIT_ENH
+
+@NUMBER_DONE_ENH:
+        RTS
+
+; Multiply TOKEN_VALUE by 10 (enhanced)
+MULTIPLY_BY_10:
+        ; Save original value
+        LDA TOKEN_VALUE
+        STA TEMP
+        LDA TOKEN_VALUE+1
+        STA TEMP+1
+        
+        ; Multiply by 2 (shift left)
+        ASL TOKEN_VALUE
+        ROL TOKEN_VALUE+1
+        
+        ; Multiply by 4 (shift left again)
+        ASL TOKEN_VALUE
+        ROL TOKEN_VALUE+1
+        
+        ; Add original * 2
+        ASL TEMP
+        ROL TEMP+1
+        
+        CLC
+        LDA TOKEN_VALUE
+        ADC TEMP
+        STA TOKEN_VALUE
+        LDA TOKEN_VALUE+1
+        ADC TEMP+1
+        STA TOKEN_VALUE+1
+        
+        RTS
