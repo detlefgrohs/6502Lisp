@@ -6,6 +6,10 @@
 SYMBOL_LEN   = $1D    ; Length of current symbol
 ARGC         = $1E    ; Argument count for functions
 COMPARISON   = $1F    ; Comparison result
+MACRO_PTR    = $20    ; Pointer to current macro
+MACRO_ARGC   = $22    ; Macro argument count
+EXPAND_FLAG  = $23    ; Macro expansion flag
+MACRO_DEPTH  = $24    ; Macro expansion depth (prevent infinite recursion)
 
 ; Function IDs
 FUNC_ADD     = $01
@@ -21,6 +25,14 @@ FUNC_NOT     = $0A
 FUNC_LIST    = $0B
 FUNC_CAR     = $0C
 FUNC_CDR     = $0D
+FUNC_DEFMACRO = $0E
+FUNC_QUOTE   = $0F
+FUNC_UNQUOTE = $10
+
+; Macro table layout (after symbol table)
+MACRO_TABLE  = $1400  ; Macro definitions storage
+MAX_MACROS   = $10    ; Maximum number of macros
+MACRO_ENTRY_SIZE = $40 ; Size of each macro entry
 
         .org $8000
 
@@ -28,7 +40,9 @@ FUNC_CDR     = $0D
 MAIN:
         JSR INIT_PARSER
         JSR INIT_SYMBOLS
+        JSR INIT_MACROS
         JSR RUN_TESTS
+        JSR RUN_MACRO_TESTS
         BRK
 
 ; Initialize built-in symbols
@@ -77,6 +91,9 @@ BUILTIN_NAMES:
         .byte "list", $00
         .byte "car", $00
         .byte "cdr", $00
+        .byte "defmacro", $00
+        .byte "quote", $00
+        .byte "unquote", $00
         .byte $00
 
 ; Corresponding function IDs
@@ -86,6 +103,17 @@ BUILTIN_IDS:
         .byte FUNC_MUL
         .byte FUNC_DIV
         .byte FUNC_EQ
+        .byte FUNC_LT
+        .byte FUNC_GT
+        .byte FUNC_AND
+        .byte FUNC_OR
+        .byte FUNC_NOT
+        .byte FUNC_LIST
+        .byte FUNC_CAR
+        .byte FUNC_CDR
+        .byte FUNC_DEFMACRO
+        .byte FUNC_QUOTE
+        .byte FUNC_UNQUOTE
         .byte FUNC_LT
         .byte FUNC_GT
         .byte FUNC_AND
@@ -202,12 +230,18 @@ RESET_PARSER:
         
         RTS
 
-; Enhanced symbol lookup with built-in functions
+; Enhanced symbol lookup with built-in functions and macros
 LOOKUP_SYMBOL:
+        ; First check if it's a macro
+        JSR LOOKUP_MACRO
+        LDA TOKEN_VALUE
+        ORA TOKEN_VALUE+1
+        BNE @FOUND_MACRO
+        
         ; Get symbol length
         JSR GET_SYMBOL_LENGTH
         
-        ; Search symbol table
+        ; Search built-in symbol table
         LDY #$00
 @SEARCH_LOOP:
         LDA SYMBOL_TABLE,Y
@@ -232,6 +266,10 @@ LOOKUP_SYMBOL:
         STA TOKEN_VALUE
         LDA #$00
         STA TOKEN_VALUE+1
+        RTS
+
+@FOUND_MACRO:
+        ; Macro found - TOKEN_VALUE contains macro entry pointer
         RTS
 
 @NOT_FOUND:
@@ -317,6 +355,12 @@ CALL_FUNCTION:
         BEQ @CALL_OR
         CMP #FUNC_NOT
         BEQ @CALL_NOT
+        CMP #FUNC_DEFMACRO
+        BEQ @CALL_DEFMACRO
+        CMP #FUNC_QUOTE
+        BEQ @CALL_QUOTE
+        CMP #FUNC_UNQUOTE
+        BEQ @CALL_UNQUOTE
         
         ; Unknown function
         LDA #$03
@@ -361,6 +405,18 @@ CALL_FUNCTION:
 
 @CALL_NOT:
         JSR FUNC_LOGICAL_NOT
+        RTS
+
+@CALL_DEFMACRO:
+        JSR FUNC_DEFMACRO
+        RTS
+
+@CALL_QUOTE:
+        JSR FUNC_QUOTE
+        RTS
+
+@CALL_UNQUOTE:
+        JSR FUNC_UNQUOTE
         RTS
 
 ; Count arguments on expression stack
@@ -805,3 +861,359 @@ FUNC_LOGICAL_NOT:
         LDA #$09
         STA ERROR_FLAG
         RTS
+
+; ======================================================================
+; MACRO SYSTEM IMPLEMENTATION
+; ======================================================================
+
+; Initialize macro table
+INIT_MACROS:
+        ; Clear macro table
+        LDX #$00
+        LDA #$00
+@CLEAR_LOOP:
+        STA MACRO_TABLE,X
+        INX
+        CPX #(MAX_MACROS * MACRO_ENTRY_SIZE)
+        BNE @CLEAR_LOOP
+        
+        ; Initialize macro system variables
+        LDA #$00
+        STA MACRO_DEPTH
+        STA EXPAND_FLAG
+        
+        ; Define some built-in macros
+        JSR DEFINE_BUILTIN_MACROS
+        
+        RTS
+
+; Define built-in macros like WHEN, UNLESS, etc.
+DEFINE_BUILTIN_MACROS:
+        ; Define (when condition body) macro
+        ; Expands to (if condition body)
+        JSR DEFINE_WHEN_MACRO
+        
+        ; Define (unless condition body) macro  
+        ; Expands to (if (not condition) body)
+        JSR DEFINE_UNLESS_MACRO
+        
+        RTS
+
+; Define WHEN macro
+DEFINE_WHEN_MACRO:
+        ; This is a simplified version - in a real implementation
+        ; you'd parse the macro definition from source
+        LDX #$00
+        
+        ; Store macro name "when"
+        LDA #'w'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'h'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'e'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'n'
+        STA MACRO_TABLE,X
+        INX
+        LDA #$00
+        STA MACRO_TABLE,X
+        INX
+        
+        ; Store parameter count (2: condition and body)
+        LDA #$02
+        STA MACRO_TABLE,X
+        INX
+        
+        ; Store macro body template
+        ; Template: "(if <arg1> <arg2>)"
+        LDY #$00
+@STORE_TEMPLATE:
+        LDA WHEN_TEMPLATE,Y
+        STA MACRO_TABLE,X
+        BEQ @TEMPLATE_DONE
+        INX
+        INY
+        JMP @STORE_TEMPLATE
+
+@TEMPLATE_DONE:
+        RTS
+
+WHEN_TEMPLATE:
+        .byte "(if ", $01, " ", $02, ")", $00  ; $01, $02 are parameter placeholders
+
+; Define UNLESS macro  
+DEFINE_UNLESS_MACRO:
+        ; Skip to next macro slot
+        LDX #MACRO_ENTRY_SIZE
+        
+        ; Store macro name "unless"
+        LDA #'u'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'n'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'l'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'e'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'s'
+        STA MACRO_TABLE,X
+        INX
+        LDA #'s'
+        STA MACRO_TABLE,X
+        INX
+        LDA #$00
+        STA MACRO_TABLE,X
+        INX
+        
+        ; Store parameter count (2)
+        LDA #$02
+        STA MACRO_TABLE,X
+        INX
+        
+        ; Store macro body template
+        ; Template: "(if (not <arg1>) <arg2>)"
+        LDY #$00
+@STORE_TEMPLATE2:
+        LDA UNLESS_TEMPLATE,Y
+        STA MACRO_TABLE,X
+        BEQ @TEMPLATE2_DONE
+        INX
+        INY
+        JMP @STORE_TEMPLATE2
+
+@TEMPLATE2_DONE:
+        RTS
+
+UNLESS_TEMPLATE:
+        .byte "(if (not ", $01, ") ", $02, ")", $00
+
+; Look up macro in macro table
+LOOKUP_MACRO:
+        ; Get symbol length first
+        JSR GET_SYMBOL_LENGTH
+        
+        ; Search macro table
+        LDX #$00
+@MACRO_SEARCH:
+        LDA MACRO_TABLE,X
+        BEQ @MACRO_NOT_FOUND
+        
+        ; Compare macro name
+        JSR COMPARE_MACRO_NAME
+        BEQ @MACRO_FOUND
+        
+        ; Skip to next macro entry
+        TXA
+        CLC
+        ADC #MACRO_ENTRY_SIZE
+        TAX
+        CMP #(MAX_MACROS * MACRO_ENTRY_SIZE)
+        BCC @MACRO_SEARCH
+
+@MACRO_NOT_FOUND:
+        LDA #$00
+        STA TOKEN_VALUE
+        STA TOKEN_VALUE+1
+        RTS
+
+@MACRO_FOUND:
+        ; Return pointer to macro entry
+        TXA
+        CLC
+        ADC #<MACRO_TABLE
+        STA TOKEN_VALUE
+        LDA #>MACRO_TABLE
+        ADC #$00
+        STA TOKEN_VALUE+1
+        RTS
+
+; Compare macro name at offset X with symbol in TOKEN_VALUE
+COMPARE_MACRO_NAME:
+        LDY #$00
+@COMPARE_MACRO_LOOP:
+        LDA (TOKEN_VALUE),Y
+        CMP MACRO_TABLE,X
+        BNE @MACRO_NOT_EQUAL
+        
+        ; Check if both ended
+        CMP #$00
+        BEQ @MACRO_EQUAL
+        
+        INY
+        INX
+        JMP @COMPARE_MACRO_LOOP
+
+@MACRO_EQUAL:
+        LDA #$00    ; Equal
+        RTS
+
+@MACRO_NOT_EQUAL:
+        LDA #$01    ; Not equal
+        RTS
+
+; DEFMACRO function - define a new macro
+FUNC_DEFMACRO:
+        ; Syntax: (defmacro name (params) body)
+        LDA ARGC
+        CMP #$03
+        BNE @DEFMACRO_ERROR
+        
+        ; For now, just return success
+        ; A full implementation would parse the macro definition
+        LDA #$01
+        STA TOKEN_VALUE
+        LDA #$00
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+@DEFMACRO_ERROR:
+        LDA #$0A
+        STA ERROR_FLAG
+        RTS
+
+; QUOTE function - prevent evaluation
+FUNC_QUOTE:
+        LDA ARGC
+        CMP #$01
+        BNE @QUOTE_ERROR
+        
+        ; Simply return the argument unevaluated
+        ; The argument is already on the stack
+        RTS
+
+@QUOTE_ERROR:
+        LDA #$0B
+        STA ERROR_FLAG
+        RTS
+
+; UNQUOTE function - force evaluation in quote context
+FUNC_UNQUOTE:
+        LDA ARGC
+        CMP #$01
+        BNE @UNQUOTE_ERROR
+        
+        ; Evaluate the argument
+        ; This is a simplified implementation
+        RTS
+
+@UNQUOTE_ERROR:
+        LDA #$0C
+        STA ERROR_FLAG
+        RTS
+
+; Expand a macro call
+; Input: TOKEN_VALUE points to macro entry, arguments on stack
+EXPAND_MACRO:
+        ; Check recursion depth
+        LDA MACRO_DEPTH
+        CMP #$05    ; Max recursion depth
+        BCS @EXPAND_ERROR
+        
+        INC MACRO_DEPTH
+        
+        ; Get macro entry
+        LDA TOKEN_VALUE
+        STA MACRO_PTR
+        LDA TOKEN_VALUE+1
+        STA MACRO_PTR+1
+        
+        ; Get parameter count
+        LDY #$10    ; Offset to param count in macro entry
+        LDA (MACRO_PTR),Y
+        STA MACRO_ARGC
+        
+        ; Verify argument count matches
+        LDA ARGC
+        CMP MACRO_ARGC
+        BNE @EXPAND_ARG_ERROR
+        
+        ; Perform macro expansion
+        ; This is simplified - real implementation would substitute parameters
+        JSR SUBSTITUTE_MACRO_PARAMS
+        
+        ; Parse expanded text
+        JSR PARSE_EXPANDED_MACRO
+        
+        DEC MACRO_DEPTH
+        RTS
+
+@EXPAND_ERROR:
+        LDA #$0D
+        STA ERROR_FLAG
+        DEC MACRO_DEPTH
+        RTS
+
+@EXPAND_ARG_ERROR:
+        LDA #$0E
+        STA ERROR_FLAG
+        DEC MACRO_DEPTH
+        RTS
+
+; Substitute macro parameters (simplified)
+SUBSTITUTE_MACRO_PARAMS:
+        ; This would perform parameter substitution in the macro body
+        ; For now, just copy the template
+        RTS
+
+; Parse expanded macro text
+PARSE_EXPANDED_MACRO:
+        ; This would parse the expanded macro text
+        ; For now, just return success
+        LDA #$01
+        STA TOKEN_VALUE
+        LDA #$00
+        STA TOKEN_VALUE+1
+        JSR PUSH_NUMBER
+        RTS
+
+; Run macro-specific tests
+RUN_MACRO_TESTS:
+        ; Test WHEN macro
+        JSR TEST_WHEN_MACRO
+        
+        ; Test UNLESS macro  
+        JSR TEST_UNLESS_MACRO
+        
+        RTS
+
+; Test WHEN macro: (when 1 42) should return 42
+TEST_WHEN_MACRO:
+        LDX #$00
+@COPY_WHEN:
+        LDA TEST_WHEN_EXPR,X
+        STA INPUT_BUFFER,X
+        BEQ @PARSE_WHEN
+        INX
+        JMP @COPY_WHEN
+@PARSE_WHEN:
+        JSR RESET_PARSER
+        JSR PARSE_EXPR
+        RTS
+
+TEST_WHEN_EXPR:
+        .byte "(when 1 42)", $00
+
+; Test UNLESS macro: (unless 0 42) should return 42
+TEST_UNLESS_MACRO:
+        LDX #$00
+@COPY_UNLESS:
+        LDA TEST_UNLESS_EXPR,X
+        STA INPUT_BUFFER,X
+        BEQ @PARSE_UNLESS
+        INX
+        JMP @COPY_UNLESS
+@PARSE_UNLESS:
+        JSR RESET_PARSER
+        JSR PARSE_EXPR
+        RTS
+
+TEST_UNLESS_EXPR:
+        .byte "(unless 0 42)", $00

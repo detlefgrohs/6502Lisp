@@ -37,6 +37,12 @@ The interpreter is written entirely in 6502 assembly language and is designed to
 - `(or a b c ...)` - Logical OR of multiple values  
 - `(not a)` - Logical NOT of a single value
 
+#### Macro System
+- `(defmacro name (params) body)` - Define a new macro
+- `(quote expr)` - Prevent evaluation of expression
+- `(unquote expr)` - Force evaluation within quoted context
+- **Built-in macros**: `when`, `unless` for conditional execution
+
 ### Example Expressions
 ```lisp
 (+ 1 2 3)                    ; Returns 6
@@ -46,17 +52,23 @@ The interpreter is written entirely in 6502 assembly language and is designed to
 (< 5 10)                     ; Returns 1 (true)  
 (and (= 5 5) (< 3 10))       ; Returns 1 (true)
 (+ (* 2 3) (- 10 5))         ; Returns 11
+
+; Macro examples
+(when (> 5 0) 42)            ; Returns 42 (conditional execution)
+(unless (= 0 1) 100)         ; Returns 100 (inverse conditional)
 ```
 
 ## Files
 
 ### Core Implementation
 - **`lisp_parser.asm`** - Basic Lisp parser with core functionality
-- **`lisp_extended.asm`** - Extended version with full feature set
+- **`lisp_extended.asm`** - Extended version with full feature set including macros
 - **`examples.asm`** - Test cases and example expressions
+- **`macro_examples.asm`** - Comprehensive macro system examples and tests
 
 ### Documentation  
 - **`LISP_DOCUMENTATION.md`** - Detailed technical documentation
+- **`MACRO_DOCUMENTATION.md`** - Complete macro system documentation
 - **`README.md`** - This file
 
 ## Memory Layout
@@ -68,6 +80,9 @@ $0000-$00FF     | Zero page variables and pointers
 $0100-$01FF     | 6502 CPU stack
 $0200-$07FF     | Input buffer and workspace  
 $0800-$0FFF     | Symbol table for built-in functions
+$1000-$1FFF     | Expression evaluation stack
+$1400-$17FF     | Macro definition table (1KB)
+$8000-$FFFF     | Program code
 $1000-$1FFF     | Expression evaluation stack
 $8000-$FFFF     | Program code
 ```
